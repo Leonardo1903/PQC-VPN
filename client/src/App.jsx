@@ -8,6 +8,7 @@ function App() {
   const [status, setStatus] = useState(null)
   const [serverIp, setServerIp] = useState('')
   const [copied, setCopied] = useState(false)
+  const [htmlContent, setHtmlContent] = useState('')
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -26,6 +27,7 @@ function App() {
       })
       setStatus(response.data.status)
       setServerIp(response.data.server_ip)
+      setHtmlContent(response.data.html)
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to fetch the URL. Please check if the proxy server is running.')
     } finally {
@@ -40,7 +42,7 @@ function App() {
       {/* Header */}
       <header className="bg-black/30 backdrop-blur-lg border-b border-white/10 p-8 shadow-lg">
         <div className="max-w-4xl mx-auto flex flex-col items-center">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-white mb-2 text-center tracking-tight drop-shadow-xl bg-gradient-to-r from-purple-400 via-blue-400 to-pink-400 bg-clip-text text-transparent animate-gradient-x">🦀 Just Proxy Client</h1>
+          <h1 className="text-4xl md:text-5xl font-extrabold mb-2 text-center tracking-tight drop-shadow-xl bg-gradient-to-r from-purple-400 via-blue-400 to-pink-400 bg-clip-text text-transparent animate-gradient-x">🦀 Just Proxy Client</h1>
           <p className="text-slate-300 text-center text-lg font-medium">Browse any public site through your Rust proxy server</p>
         </div>
       </header>
