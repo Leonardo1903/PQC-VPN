@@ -246,33 +246,6 @@ async fn handle_ws_connection(
     Ok(response)
 }
 
-async fn list_sessions(
-    session_manager: web::Data<SessionManager>,
-    req: HttpRequest,
-) -> Result<HttpResponse, Error> {
-    // Validate admin JWT token here
-    if !validate_admin_token(req.headers()) {
-        return Ok(HttpResponse::Unauthorized().finish());
-    }
-
-    let sessions = session_manager.list_sessions();
-    Ok(HttpResponse::Ok().json(sessions))
-}
-
-fn validate_admin_token(headers: &actix_web::http::header::HeaderMap) -> bool {
-    // Implement JWT validation for admin endpoints
-    if let Some(auth_header) = headers.get("Authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let _token = &auth_str[7..];
-                // Validate JWT token here
-                return true; // Placeholder - implement actual JWT validation
-            }
-        }
-    }
-    false
-}
-
 fn get_local_ip() -> Option<String> {
     use std::net::TcpStream;
 
@@ -312,7 +285,6 @@ async fn main() -> std::io::Result<()> {
             .app_data(session_manager.clone())
             .wrap(middleware::Logger::default())
             .service(web::resource("/vpn").route(web::get().to(handle_ws_connection)))
-            .service(web::resource("/admin/sessions").route(web::get().to(list_sessions)))
     })
     .bind("0.0.0.0:8000")?
     .run()
