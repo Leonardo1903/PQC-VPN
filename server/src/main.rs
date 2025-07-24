@@ -1,151 +1,320 @@
-use actix_cors::Cors;
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
-use reqwest::Client;
+use actix_web::{middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
+use actix_ws::Message;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-async fn get_public_ip() -> String {
-    // Try to get the public IP address using external services
-    let services = [
-        "https://api.ipify.org",
-        "https://ifconfig.me/ip",
-        "https://icanhazip.com",
-    ];
-    
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    
-    for service in &services {
-        if let Ok(response) = client.get(*service).send().await {
-            if let Ok(ip) = response.text().await {
-                let ip = ip.trim();
-                if !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok() {
-                    return format!("{}:8888", ip);
-                }
-            }
-        }
-    }
-    
-    "unknown:8888".to_string() // Fallback if all services fail
+mod crypto;
+mod session;
+
+use crypto::KeyExchange;
+use session::SessionManager;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthRequest {
+    #[serde(rename = "type")]
+    message_type: String,
+    username: String,
 }
 
-#[derive(Deserialize)]
-struct ProxyRequest {
-    url: String,
+#[derive(Debug, Serialize, Deserialize)]
+struct HandshakeRequest {
+    client_public_key: Vec<u8>,
+    signature: Vec<u8>,
 }
 
-#[derive(Serialize)]
-struct ProxyResponse {
-    html: String,
-    status: u16,
-    server_ip: String,
+#[derive(Debug, Serialize, Deserialize)]
+struct VpnPacket {
+    #[serde(rename = "type")]
+    packet_type: String,
+    data: Vec<u8>,
+    destination: Option<String>,
+    protocol: Option<String>,
 }
 
-async fn proxy_handler(req: web::Json<ProxyRequest>) -> Result<HttpResponse> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .unwrap();
+#[derive(Debug, Serialize, Deserialize)]
+struct StatsRequest {
+    #[serde(rename = "type")]
+    message_type: String,
+}
 
-    println!("Fetching URL: {}", req.url);
+#[derive(Debug, Serialize, Deserialize)]
+struct ServerListRequest {
+    #[serde(rename = "type")]
+    message_type: String,
+}
 
-    match client.get(&req.url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-        .header("Accept-Language", "en-US,en;q=0.5")
-        .header("DNT", "1")
-        .header("Connection", "keep-alive")
-        .header("Upgrade-Insecure-Requests", "1")
-        .send()
-        .await {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let headers = response.headers().clone();
-            
-            println!("Response status: {}", status);
-            println!("Content-Type: {:?}", headers.get("content-type"));
-            
-            match response.text().await {
-                Ok(mut html) => {
-                    // Fix relative URLs to absolute URLs
-                    let base_url = &req.url;
-                    if let Ok(parsed_url) = url::Url::parse(base_url) {
-                        let origin = format!("{}://{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(""));
-                        
-                        // Replace relative URLs with absolute URLs
-                        html = html.replace("href=\"/", &format!("href=\"{}/", origin));
-                        html = html.replace("src=\"/", &format!("src=\"{}/", origin));
-                        html = html.replace("action=\"/", &format!("action=\"{}/", origin));
-                        
-                        // Fix CSS url() references
-                        html = html.replace("url(/_next/", &format!("url({}//_next/", origin));
-                        html = html.replace("url(/", &format!("url({}/", origin));
-                        
-                        // Also handle protocol-relative URLs
-                        html = html.replace("href=\"//", "href=\"https://");
-                        html = html.replace("src=\"//", "src=\"https://");
+async fn handle_ws_connection(
+    req: HttpRequest,
+    stream: web::Payload,
+    session_manager: web::Data<SessionManager>,
+) -> Result<HttpResponse, Error> {
+    let (response, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
+    let peer_addr = req
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_default();
+
+    // Get server's local IP address
+    let server_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+
+    let key_exchange = KeyExchange::new();
+    let (kyber_public_key, dilithium_public_key) = key_exchange.get_public_keys();
+
+    // Send server's public keys
+    let initial_message = serde_json::json!({
+        "kyber_public_key": kyber_public_key,
+        "dilithium_public_key": dilithium_public_key,
+    });
+
+    let _ = session
+        .text(serde_json::to_string(&initial_message).unwrap())
+        .await;
+
+    // Use actix_rt::spawn for non-Send futures
+    actix_rt::spawn(async move {
+        let mut session_id: Option<String> = None;
+        let mut bytes_rx = 0u64;
+        let mut bytes_tx = 0u64;
+        let last_ping = std::time::Instant::now();
+
+        while let Some(msg) = msg_stream.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    // Try to parse as auth request first
+                    if let Ok(auth_req) = serde_json::from_str::<AuthRequest>(&text) {
+                        if auth_req.message_type == "auth" {
+                            // Simple auth success response
+                            let response = serde_json::json!({
+                                "type": "auth_success",
+                                "message": "Authentication successful",
+                                "server_info": {
+                                    "name": "Quantum VPN Server",
+                                    "location": "Global",
+                                    "encryption": "Post-Quantum (Kyber768 + Dilithium2)",
+                                    "ip_address": server_ip,
+                                    "port": "8000"
+                                }
+                            });
+
+                            if let Err(e) = session
+                                .text(serde_json::to_string(&response).unwrap())
+                                .await
+                            {
+                                log::error!("Failed to send auth response: {}", e);
+                                break;
+                            }
+
+                            // Start sending periodic stats
+                            let mut session_clone = session.clone();
+                            tokio::spawn(async move {
+                                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                                loop {
+                                    interval.tick().await;
+                                    let stats = serde_json::json!({
+                                        "type": "stats",
+                                        "latency": rand::random::<u32>() % 50 + 10, // Simulated latency
+                                        "bytes": {
+                                            "rx": bytes_rx,
+                                            "tx": bytes_tx
+                                        },
+                                        "connected_users": 1,
+                                        "server_load": rand::random::<u32>() % 30 + 20
+                                    });
+
+                                    if session_clone
+                                        .text(serde_json::to_string(&stats).unwrap())
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            });
+                            continue;
+                        }
                     }
-                    
-                    println!("HTML content length: {} chars", html.len());
-                    
-                    // Get the server's public IP address
-                    let server_ip = get_public_ip().await;
-                    
-                    let proxy_response = ProxyResponse {
-                        html,
-                        status,
-                        server_ip,
-                    };
-                    Ok(HttpResponse::Ok().json(proxy_response))
+
+                    // Handle stats request
+                    if let Ok(stats_req) = serde_json::from_str::<StatsRequest>(&text) {
+                        if stats_req.message_type == "get_stats" {
+                            let response = serde_json::json!({
+                                "type": "stats_response",
+                                "latency": (std::time::Instant::now() - last_ping).as_millis() as u32,
+                                "bytes": {
+                                    "rx": bytes_rx,
+                                    "tx": bytes_tx
+                                },
+                                "uptime": "Connected",
+                                "server_load": rand::random::<u32>() % 30 + 20
+                            });
+
+                            if let Err(e) = session
+                                .text(serde_json::to_string(&response).unwrap())
+                                .await
+                            {
+                                log::error!("Failed to send stats response: {}", e);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Handle VPN packet tunneling
+                    if let Ok(vpn_packet) = serde_json::from_str::<VpnPacket>(&text) {
+                        if vpn_packet.packet_type == "tunnel_data" {
+                            bytes_rx += vpn_packet.data.len() as u64;
+
+                            // Simulate packet processing and forwarding
+                            log::debug!(
+                                "Processing VPN packet of {} bytes to {:?}",
+                                vpn_packet.data.len(),
+                                vpn_packet.destination
+                            );
+
+                            // Echo back processed data (in real implementation, forward to destination)
+                            let response_packet = serde_json::json!({
+                                "type": "tunnel_response",
+                                "data": vpn_packet.data,
+                                "processed": true
+                            });
+
+                            bytes_tx += vpn_packet.data.len() as u64;
+
+                            if let Err(e) = session
+                                .text(serde_json::to_string(&response_packet).unwrap())
+                                .await
+                            {
+                                log::error!("Failed to send tunnel response: {}", e);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Try to parse as handshake request
+                    if let Ok(handshake) = serde_json::from_str::<HandshakeRequest>(&text) {
+                        // Verify client's signature
+                        if key_exchange
+                            .verify_client_signature(
+                                &handshake.client_public_key,
+                                &handshake.signature,
+                                &handshake.client_public_key,
+                            )
+                            .is_ok()
+                        {
+                            // Process client's public key and generate shared secret
+                            if let Ok(shared_secret) =
+                                key_exchange.process_client_key(&handshake.client_public_key)
+                            {
+                                // Create session with the shared secret
+                                if let Ok(id) = session_manager.create_session(
+                                    peer_addr.clone(),
+                                    shared_secret,
+                                    session.clone(),
+                                ) {
+                                    session_id = Some(id);
+                                    log::info!("Session established for {}", peer_addr);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Message::Binary(data)) => {
+                    if let Some(id) = &session_id {
+                        if let Some(mut vpn_session) = session_manager.get_session(id) {
+                            if let Ok(_decrypted) = vpn_session.crypto.decrypt(&data) {
+                                // Handle decrypted VPN traffic here
+                                log::debug!("Received {} bytes of encrypted data", data.len());
+                            }
+                        }
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    if let Some(id) = &session_id {
+                        session_manager.remove_session(id);
+                    }
+                    break;
                 }
                 Err(e) => {
-                    println!("Failed to read response body: {}", e);
-                    Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to read response body: {}", e)
-                    })))
+                    log::error!("WebSocket error: {}", e);
+                    break;
                 }
+                _ => {}
             }
         }
-        Err(e) => {
-            println!("Failed to fetch URL: {}", e);
-            Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Failed to fetch the URL: {}", e)
-            })))
+    });
+
+    Ok(response)
+}
+
+async fn list_sessions(
+    session_manager: web::Data<SessionManager>,
+    req: HttpRequest,
+) -> Result<HttpResponse, Error> {
+    // Validate admin JWT token here
+    if !validate_admin_token(req.headers()) {
+        return Ok(HttpResponse::Unauthorized().finish());
+    }
+
+    let sessions = session_manager.list_sessions();
+    Ok(HttpResponse::Ok().json(sessions))
+}
+
+fn validate_admin_token(headers: &actix_web::http::header::HeaderMap) -> bool {
+    // Implement JWT validation for admin endpoints
+    if let Some(auth_header) = headers.get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let _token = &auth_str[7..];
+                // Validate JWT token here
+                return true; // Placeholder - implement actual JWT validation
+            }
         }
     }
+    false
+}
+
+fn get_local_ip() -> Option<String> {
+    use std::net::TcpStream;
+
+    // Try to connect to a remote address to determine local IP
+    if let Ok(stream) = TcpStream::connect("8.8.8.8:80") {
+        if let Ok(local_addr) = stream.local_addr() {
+            return Some(local_addr.ip().to_string());
+        }
+    }
+
+    // Fallback: try to get local network interfaces
+    None
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    println!("🦀 Proxy Server starting on http://localhost:8888");
-    
-    HttpServer::new(|| {
-        let cors = Cors::default()
-            .allowed_origin("http://localhost:5173")
-            .allowed_origin("http://localhost:5174")
-            .allowed_origin("http://localhost:3000")
-            .allowed_origin_fn(|origin, _req_head| {
-                origin.as_bytes().starts_with(b"file://") || 
-                origin.as_bytes().starts_with(b"http://localhost") ||
-                origin.as_bytes().starts_with(b"http://127.0.0.1")
-            })
-            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
-            .allowed_headers(vec![
-                actix_web::http::header::AUTHORIZATION, 
-                actix_web::http::header::ACCEPT,
-                actix_web::http::header::CONTENT_TYPE,
-                actix_web::http::header::ACCESS_CONTROL_ALLOW_ORIGIN
-            ])
-            .supports_credentials();
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
+    let session_manager = web::Data::new(SessionManager::new());
+    let session_manager_cleanup = session_manager.clone();
+
+    // Cleanup inactive sessions periodically
+    tokio::spawn(async move {
+        let cleanup_interval = Duration::from_secs(300); // 5 minutes
+        let session_timeout = Duration::from_secs(3600); // 1 hour
+
+        loop {
+            tokio::time::sleep(cleanup_interval).await;
+            session_manager_cleanup.cleanup_inactive_sessions(session_timeout);
+        }
+    });
+
+    log::info!("Starting VPN server on 0.0.0.0:8000");
+
+    HttpServer::new(move || {
         App::new()
-            .wrap(cors)
-            .route("/proxy", web::post().to(proxy_handler))
+            .app_data(session_manager.clone())
+            .wrap(middleware::Logger::default())
+            .service(web::resource("/vpn").route(web::get().to(handle_ws_connection)))
+            .service(web::resource("/admin/sessions").route(web::get().to(list_sessions)))
     })
-    .bind("127.0.0.1:8888")?
+    .bind("0.0.0.0:8000")?
     .run()
     .await
 }

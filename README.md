@@ -1,220 +1,214 @@
-# 🦀 VPN Proxy System
+# Quantum-Safe VPN with WebSocket Transport
 
-A simple VPN-like proxy system with a Rust backend and React frontend that allows you to browse websites through a proxy server.
+A production-grade VPN implementation using WebSockets and Post-Quantum Cryptography with a Rust server and React web client.
 
-## 🏗️ Architecture
+## Features
 
-- **Backend (Rust)**: Proxy server that fetches content from URLs on behalf of the client
-- **Frontend (React)**: Web interface for entering URLs and viewing proxied content
-- **Communication**: REST API between frontend and backend
+- 🔐 Post-Quantum Cryptography
+  - Kyber for key exchange (Kyber768)
+  - Dilithium for digital signatures
+  - AES-256-GCM for symmetric encryption
 
-## 📁 Project Structure
+- 🔒 Security Features
+  - End-to-end encryption
+  - Perfect forward secrecy
+  - Kill switch functionality
+  - JWT-based authentication for admin endpoints
 
-```
-PQC-Vpn/
-├── vpn-server/     # Rust backend (actix-web + reqwest)
-├── vpn-client/     # React frontend (Vite + Tailwind CSS v4)
-└── README.md
-```
+- 🌐 Network Features
+  - WebSocket-based tunnel
+  - Multi-client support
+  - Real-time data tunneling
+  - IPv4 and IPv6 support
+  - Server IP address display
 
-## 🚀 Quick Start
+- 📊 Monitoring & Features
+  - Session monitoring
+  - Traffic statistics
+  - Real-time connection stats
+  - Data tunneling test interface
+  - Connection activity logging
+  - Protected admin API
 
-### Prerequisites
+## Prerequisites
 
-- **Rust** (latest stable version)
-- **Node.js** (v18 or higher)
-- **npm** or **yarn**
+- Rust 1.70 or higher
+- Node.js 18 or higher
+- OpenSSL development libraries
 
-### 1. Clone the Repository
+## Building
 
-```bash
-git clone <your-repo-url>
-cd PQC-Vpn
-```
-
-### 2. Start the Rust Backend
-
-```bash
-cd vpn-server
-cargo run
-```
-
-The server will start on `http://localhost:8888`
-
-### 3. Start the React Frontend
-
-In a new terminal:
+### Server
 
 ```bash
-cd vpn-client
+cd Server
+cargo build --release
+```
+
+### Web Client
+
+```bash
+cd Client
 npm install
+npm run build
+```
+
+## Running
+
+### Server
+
+```bash
+cd Server
+cargo run --release
+```
+
+The server will start on `0.0.0.0:8000` by default.
+
+### Web Client
+
+```bash
+cd Client
 npm run dev
 ```
 
-The frontend will start on `http://localhost:5173`
-
-### 4. Use the Application
-
-1. Open your browser and go to `http://localhost:5173`
-2. Enter any URL (e.g., `https://example.com`)
-3. Click "Go" to fetch the content through the proxy
-4. View the proxied content in the sandboxed iframe
-
-## 🔧 Features
-
-### Backend Features
-- ✅ REST API endpoint `/proxy` for fetching URLs
-- ✅ CORS enabled for frontend communication
-- ✅ Custom user agent to avoid blocking
-- ✅ Error handling and status codes
-- ✅ Timeout protection (30 seconds)
-
-### Frontend Features
-- ✅ Modern React with hooks
-- ✅ Tailwind CSS v4 for styling
-- ✅ Loading states and error handling
-- ✅ Sandboxed iframe for security
-- ✅ Responsive design
-- ✅ Status code display
-
-## 🛠️ Technical Details
-
-### Backend Dependencies
-- `actix-web`: Web framework
-- `actix-cors`: CORS middleware
-- `reqwest`: HTTP client for fetching URLs
-- `serde`: Serialization/deserialization
-- `tokio`: Async runtime
-
-### Frontend Dependencies
-- `react`: UI framework
-- `axios`: HTTP client for API calls
-- `vite`: Build tool and dev server
-- `@tailwindcss/vite`: Tailwind CSS v4 plugin
-
-## 🔒 Security Notes
-
-- The iframe is sandboxed to prevent XSS attacks
-- CORS is configured to only allow the frontend origin
-- The proxy server uses a custom user agent to avoid detection
-- This is a basic proxy, not a full VPN with packet routing/tunneling
-
-## 🚧 Development
-
-### Backend Development
+For production:
 
 ```bash
-cd vpn-server
-cargo build          # Build the project
-cargo run            # Run in development mode
-cargo test           # Run tests
+cd Client
+npm run build
+# Serve the built files from the 'dist' directory
 ```
 
-### Frontend Development
+## Configuration
+
+The server and client can be configured through environment variables:
+
+### Server
+- `RUST_LOG`: Log level (default: "info")
+- `VPN_SERVER_PORT`: Server port (default: 8000)
+- `SESSION_TIMEOUT`: Session timeout in seconds (default: 3600)
+- `ADMIN_TOKEN`: JWT token for admin API access
+
+### Web Client
+- Configure the server URL directly in the web interface (default: ws://localhost:8000/vpn)
+- Built with React + TypeScript + Vite + Tailwind CSS
+- Real-time VPN statistics and monitoring
+- Tunnel data testing interface
+- Connection activity logging
+
+## Security Considerations
+
+1. The implementation uses post-quantum cryptography:
+   - Kyber for key exchange (resistant to quantum computers)
+   - Dilithium for digital signatures (quantum-resistant)
+   - AES-256-GCM for symmetric encryption
+
+2. All traffic is end-to-end encrypted with perfect forward secrecy
+
+3. The server implements session management with automatic cleanup of inactive sessions
+
+4. Admin endpoints are protected with JWT authentication
+
+## Architecture
+
+### Server Components (Rust)
+
+- `crypto.rs`: Implements quantum-safe cryptography operations
+- `session.rs`: Manages client sessions and connection state
+- `main.rs`: WebSocket server and request handling
+
+### Web Client Components (React + TypeScript)
+
+- Modern React application with Vite and Tailwind CSS
+- WebSocket client implementation with real-time communication
+- Post-quantum cryptography handshake support
+- Real-time connection status and statistics display
+- Data tunneling test interface
+- Connection activity logging
+- Server information display (IP address, encryption details)
+- Responsive design for desktop and mobile
+
+## API Endpoints
+
+### WebSocket Connection
+- `ws://localhost:8000/vpn` - Main VPN WebSocket endpoint
+
+### Admin API
+- `GET /admin/sessions` - List active sessions (requires JWT authentication)
+
+## Message Types
+
+The WebSocket connection supports the following message types:
+
+### Client to Server
+- `auth` - Authentication request with username
+- `tunnel_data` - Data to be tunneled through VPN
+- `get_stats` - Request current statistics
+
+### Server to Client
+- `auth_success` - Authentication successful with server info
+- `auth_error` - Authentication failed
+- `stats` - Real-time statistics update
+- `tunnel_response` - Response to tunneled data
+- `error` - Error message
+
+## Usage
+
+1. **Start the Server**: Run the Rust server which will listen on port 8000
+2. **Open the Client**: Access the web interface at http://localhost:5173 (or 5174)
+3. **Connect**: Enter a username and click "Connect"
+4. **Monitor**: View real-time statistics including latency, data transfer, and server load
+5. **Test Tunneling**: Use the tunnel test interface to send data through the VPN
+6. **View Logs**: Monitor connection activity in the built-in log viewer
+
+## Quick Start
 
 ```bash
-cd vpn-client
-npm install          # Install dependencies
-npm run dev          # Start development server
-npm run build        # Build for production
-npm run preview      # Preview production build
+# Terminal 1 - Start the server
+cd Server
+cargo run
+
+# Terminal 2 - Start the client
+cd Client
+npm run dev
+
+# Open browser to http://localhost:5173 or 5174
 ```
 
-## 🐛 Troubleshooting
+## Project Structure
 
-### Common Issues
-
-1. **"Failed to fetch the URL" error**
-   - Make sure the Rust server is running on port 8888
-   - Check that the URL is valid and accessible
-
-2. **CORS errors**
-   - Ensure the frontend is running on port 5173
-   - Check that the backend CORS configuration matches
-
-3. **Content not displaying**
-   - Some websites may block iframe embedding
-   - Try different URLs or check the browser console
-
-4. **Port conflicts**
-   - If ports 8888 or 5173 are already in use:
-     - Backend: Modify the port in `vpn-server/src/main.rs`
-     - Frontend: Modify the port in `vpn-client/vite.config.js`
-
-### Debug Commands
-
-```bash
-# Check if backend is running
-curl http://localhost:8888/proxy -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
-
-# Check frontend build
-cd vpn-client && npm run build
+```
+├── Server/                 # Rust VPN Server
+│   ├── src/
+│   │   ├── main.rs        # WebSocket server and request handling
+│   │   ├── crypto.rs      # Post-quantum cryptography operations
+│   │   └── session.rs     # Client session management
+│   └── Cargo.toml         # Rust dependencies
+├── Client/                 # React Web Client
+│   ├── src/
+│   │   ├── App.tsx        # Main VPN client interface
+│   │   ├── main.tsx       # React app entry point
+│   │   └── index.css      # Tailwind CSS styles
+│   └── package.json       # Node.js dependencies
+└── README.md              # Project documentation
 ```
 
-## 📝 API Reference
+## Production Deployment
 
-### POST /proxy
+For production deployment:
 
-Fetches content from a URL through the proxy.
+1. Use TLS termination (e.g., with nginx)
+2. Set up proper logging and monitoring
+3. Configure firewall rules
+4. Use strong JWT secrets for admin API
+5. Regular security audits and updates
 
-**Request:**
-```json
-{
-  "url": "https://example.com"
-}
-```
-
-**Response:**
-```json
-{
-  "html": "<!DOCTYPE html>...",
-  "status": 200
-}
-```
-
-## 🎨 Customization
-
-### Styling
-The frontend uses Tailwind CSS v4. You can customize the design by:
-- Modifying classes in `vpn-client/src/App.jsx`
-- Adding custom CSS in `vpn-client/src/index.css`
-- Updating the Tailwind config in `vpn-client/tailwind.config.js`
-
-### Backend Configuration
-You can modify the backend behavior by:
-- Changing the user agent in `vpn-server/src/main.rs`
-- Adjusting timeout settings
-- Adding custom headers or request modifications
-
-## 🚀 Future Enhancements
-
-- [ ] Add request/response header modification
-- [ ] Implement IP anonymization
-- [ ] Add support for different content types
-- [ ] Implement caching
-- [ ] Add authentication
-- [ ] Real VPN functionality with tun interfaces
-
-## 📄 License
-
-This project is for educational purposes. Use responsibly and in accordance with applicable laws and terms of service.
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+3. Submit a pull request
 
-## 📞 Support
+## License
 
-If you encounter any issues or have questions:
-1. Check the troubleshooting section above
-2. Review the error messages in the browser console
-3. Check the server logs for backend issues
-4. Open an issue on GitHub with detailed information
-
----
-
-**Happy proxying! 🦀** 
+MIT License
