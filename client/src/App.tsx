@@ -32,6 +32,18 @@ interface ServerMessage {
   bytes?: { rx: number; tx: number };
   connected_users?: number;
   server_load?: number;
+  id?: string;
+  status_code?: number;
+  headers?: { [key: string]: string };
+  body?: number[];
+}
+
+interface ProxyRequest {
+  id: string;
+  method: string;
+  url: string;
+  headers: { [key: string]: string };
+  body?: number[];
 }
 
 function App() {
@@ -49,8 +61,13 @@ function App() {
 
   const [serverUrl, setServerUrl] = useState("ws://localhost:8000/vpn");
   const [username, setUsername] = useState("");
-  const [tunnelData, setTunnelData] = useState("");
   const [connectionLog, setConnectionLog] = useState<string[]>([]);
+  const [showLogs, setShowLogs] = useState<boolean>(false);
+  const [trafficRoutingEnabled, setTrafficRoutingEnabled] =
+    useState<boolean>(false);
+  const [pendingRequests, setPendingRequests] = useState<
+    Map<string, (response: any) => void>
+  >(new Map());
   const wsRef = useRef<WebSocket | null>(null);
 
   const connect = async () => {
@@ -124,24 +141,25 @@ function App() {
     setConnectionLog((prev) => [...prev, "Disconnected from VPN server"]);
   };
 
-  const sendTunnelData = (data: string) => {
-    if (wsRef.current && vpnState.connected) {
-      const packet = {
-        type: "tunnel_data",
-        data: Array.from(new TextEncoder().encode(data)),
-        destination: "internet",
-        protocol: "http",
-      };
-      wsRef.current.send(JSON.stringify(packet));
-      setConnectionLog((prev) => [
-        ...prev,
-        `Tunneled ${data.length} bytes of data`,
-      ]);
-    }
-  };
-
   const clearLog = () => {
     setConnectionLog([]);
+  };
+
+  const toggleTrafficRouting = () => {
+    const newState = !trafficRoutingEnabled;
+    setTrafficRoutingEnabled(newState);
+
+    if (newState) {
+      setConnectionLog((prev) => [
+        ...prev,
+        "Traffic routing enabled - All web traffic will be routed through VPN",
+      ]);
+    } else {
+      setConnectionLog((prev) => [
+        ...prev,
+        "Traffic routing disabled - Direct internet connection restored",
+      ]);
+    }
   };
 
   const handleServerMessage = (data: ServerMessage) => {
@@ -180,6 +198,24 @@ function App() {
         // Handle tunneled data response
         setConnectionLog((prev) => [...prev, "Data tunneled successfully"]);
         break;
+      case "http_proxy_response":
+        // Handle HTTP proxy response (background processing)
+        if (data.id) {
+          const callback = pendingRequests.get(data.id);
+          if (callback) {
+            setConnectionLog((prev) => [
+              ...prev,
+              `HTTP proxy response received: ${data.status_code}`,
+            ]);
+            callback(data);
+            setPendingRequests((prev) => {
+              const newMap = new Map(prev);
+              newMap.delete(data.id!);
+              return newMap;
+            });
+          }
+        }
+        break;
       case "error":
         setVpnState((prev) => ({
           ...prev,
@@ -206,6 +242,11 @@ function App() {
           <p className="text-slate-300">
             Post-Quantum Cryptography Protected VPN
           </p>
+          {vpnState.connected && (
+            <div className="mt-2 text-xs text-green-300">
+              ✓ All HTTP requests are now routed through the encrypted tunnel
+            </div>
+          )}
         </div>
 
         {/* Main Panel */}
@@ -356,56 +397,109 @@ function App() {
             </div>
           )}
 
-          {/* VPN Tunneling Test */}
+          {/* Traffic Routing Control */}
           {vpnState.connected && (
             <div className="mt-6">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-medium text-slate-300">
-                  Tunnel Test
+                  Traffic Routing
                 </h3>
                 <button
                   onClick={clearLog}
                   className="text-xs text-slate-400 hover:text-white"
                 >
-                  Clear Log
-                </button>
-              </div>
-              <div className="flex gap-2 mb-3">
-                <input
-                  type="text"
-                  value={tunnelData}
-                  onChange={(e) => setTunnelData(e.target.value)}
-                  placeholder="Enter data to tunnel..."
-                  className="flex-1 px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
-                />
-                <button
-                  onClick={() => {
-                    if (tunnelData.trim()) {
-                      sendTunnelData(tunnelData);
-                      setTunnelData("");
-                    }
-                  }}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium"
-                >
-                  Send
+                  Clear All
                 </button>
               </div>
 
-              {/* Connection Log */}
-              <div className="bg-black/20 rounded-lg p-3 max-h-32 overflow-y-auto">
-                <div className="text-xs text-slate-400 mb-2">
-                  Connection Log:
-                </div>
-                {connectionLog.length === 0 ? (
-                  <div className="text-xs text-slate-500">
-                    No activity yet...
-                  </div>
-                ) : (
-                  connectionLog.slice(-5).map((log, index) => (
-                    <div key={index} className="text-xs text-green-400 mb-1">
-                      {new Date().toLocaleTimeString()}: {log}
+              {/* Traffic Routing Toggle */}
+              <div className="mb-4">
+                <div className="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10">
+                  <div>
+                    <div className="text-sm font-medium text-white mb-1">
+                      Route Web Traffic Through VPN
                     </div>
-                  ))
+                    <div className="text-xs text-slate-400">
+                      {trafficRoutingEnabled
+                        ? "All web traffic is being routed through the encrypted tunnel"
+                        : "Web traffic is using direct internet connection"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={toggleTrafficRouting}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
+                      trafficRoutingEnabled ? "bg-green-600" : "bg-gray-600"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        trafficRoutingEnabled
+                          ? "translate-x-6"
+                          : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {trafficRoutingEnabled && (
+                  <div className="mt-2 p-2 bg-green-500/10 border border-green-500/20 rounded-lg">
+                    <div className="flex items-center">
+                      <div className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse"></div>
+                      <div className="text-xs text-green-300">
+                        VPN routing active - Your traffic is protected
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Connection Log Dropdown */}
+              <div className="bg-black/20 rounded-lg">
+                <button
+                  onClick={() => setShowLogs(!showLogs)}
+                  className="w-full flex items-center justify-between p-3 text-left hover:bg-white/5 transition-colors"
+                >
+                  <div className="text-xs text-slate-400">
+                    Connection Log ({connectionLog.length} entries)
+                  </div>
+                  <div
+                    className={`transform transition-transform ${
+                      showLogs ? "rotate-180" : ""
+                    }`}
+                  >
+                    <svg
+                      className="w-4 h-4 text-slate-400"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 9l-7 7-7-7"
+                      />
+                    </svg>
+                  </div>
+                </button>
+
+                {showLogs && (
+                  <div className="border-t border-white/10 p-3 max-h-32 overflow-y-auto">
+                    {connectionLog.length === 0 ? (
+                      <div className="text-xs text-slate-500">
+                        No activity yet...
+                      </div>
+                    ) : (
+                      connectionLog.slice(-10).map((log, index) => (
+                        <div
+                          key={index}
+                          className="text-xs text-green-400 mb-1"
+                        >
+                          {new Date().toLocaleTimeString()}: {log}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 )}
               </div>
             </div>

@@ -1,8 +1,11 @@
 use actix_web::{middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_ws::Message;
 use futures::StreamExt;
+use reqwest;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
+use url::Url;
 
 mod crypto;
 mod session;
@@ -30,6 +33,27 @@ struct VpnPacket {
     data: Vec<u8>,
     destination: Option<String>,
     protocol: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HttpProxyRequest {
+    #[serde(rename = "type")]
+    message_type: String,
+    id: String,
+    method: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HttpProxyResponse {
+    #[serde(rename = "type")]
+    message_type: String,
+    id: String,
+    status_code: u16,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,7 +183,35 @@ async fn handle_ws_connection(
                         }
                     }
 
-                    // Handle VPN packet tunneling
+                    // Handle HTTP proxy requests
+                    if let Ok(proxy_req) = serde_json::from_str::<HttpProxyRequest>(&text) {
+                        if proxy_req.message_type == "http_proxy_request" {
+                            bytes_rx +=
+                                proxy_req.body.as_ref().map(|b| b.len()).unwrap_or(0) as u64;
+
+                            log::debug!(
+                                "Processing HTTP proxy request: {} {}",
+                                proxy_req.method,
+                                proxy_req.url
+                            );
+
+                            // Clone session for async task
+                            let mut session_clone = session.clone();
+
+                            tokio::spawn(async move {
+                                let response = handle_http_proxy_request(proxy_req).await;
+                                if let Err(e) = session_clone
+                                    .text(serde_json::to_string(&response).unwrap())
+                                    .await
+                                {
+                                    log::error!("Failed to send proxy response: {}", e);
+                                }
+                            });
+                            continue;
+                        }
+                    }
+
+                    // Handle VPN packet tunneling (legacy)
                     if let Ok(vpn_packet) = serde_json::from_str::<VpnPacket>(&text) {
                         if vpn_packet.packet_type == "tunnel_data" {
                             bytes_rx += vpn_packet.data.len() as u64;
@@ -244,6 +296,96 @@ async fn handle_ws_connection(
     });
 
     Ok(response)
+}
+
+async fn handle_http_proxy_request(request: HttpProxyRequest) -> HttpProxyResponse {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    let url = match Url::parse(&request.url) {
+        Ok(url) => url,
+        Err(_) => {
+            return HttpProxyResponse {
+                message_type: "http_proxy_response".to_string(),
+                id: request.id,
+                status_code: 400,
+                headers: HashMap::new(),
+                body: b"Invalid URL".to_vec(),
+            };
+        }
+    };
+
+    log::info!("Proxying {} request to: {}", request.method, url);
+
+    let mut req_builder = match request.method.as_str() {
+        "GET" => client.get(url),
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "DELETE" => client.delete(url),
+        "HEAD" => client.head(url),
+        "PATCH" => client.patch(url),
+        _ => {
+            return HttpProxyResponse {
+                message_type: "http_proxy_response".to_string(),
+                id: request.id,
+                status_code: 405,
+                headers: HashMap::new(),
+                body: b"Method not allowed".to_vec(),
+            };
+        }
+    };
+
+    // Add headers
+    for (key, value) in request.headers {
+        if !key.to_lowercase().starts_with("host") && !key.to_lowercase().starts_with("connection")
+        {
+            req_builder = req_builder.header(&key, &value);
+        }
+    }
+
+    // Add body if present
+    if let Some(body) = request.body {
+        req_builder = req_builder.body(body);
+    }
+
+    // Set user agent
+    req_builder = req_builder.header("User-Agent", "QuantumVPN/1.0");
+
+    match req_builder.send().await {
+        Ok(response) => {
+            let status_code = response.status().as_u16();
+            let mut headers = HashMap::new();
+
+            // Convert headers
+            for (key, value) in response.headers() {
+                if let Ok(value_str) = value.to_str() {
+                    headers.insert(key.to_string(), value_str.to_string());
+                }
+            }
+
+            let body = response.bytes().await.unwrap_or_default().to_vec();
+
+            HttpProxyResponse {
+                message_type: "http_proxy_response".to_string(),
+                id: request.id,
+                status_code,
+                headers,
+                body,
+            }
+        }
+        Err(e) => {
+            log::error!("HTTP proxy request failed: {}", e);
+            HttpProxyResponse {
+                message_type: "http_proxy_response".to_string(),
+                id: request.id,
+                status_code: 502,
+                headers: HashMap::new(),
+                body: format!("Proxy error: {}", e).into_bytes(),
+            }
+        }
+    }
 }
 
 fn get_local_ip() -> Option<String> {
